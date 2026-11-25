@@ -1,3 +1,7 @@
+// --- APPLICATION DATA & BACKEND API SYNC (MySQL + Express + Offline/Local Fallback) ---
+const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:5000/api' : '/api';
+let backendAvailable = false;
+
 let orders = [
   { id: '#1048', room: 'Room 304', guest: 'Emma Wilson · 2 guests', items: 'Grilled salmon, Caesar salad', status: 'New', elapsed: '2 min', total: '£36.00', allergy: 'No nuts', station: 'Hot kitchen - Chef Marco' },
   { id: '#1047', room: 'Table 12', guest: 'Walk-in · 2 guests', items: 'Truffle mushroom risotto', status: 'Preparing', elapsed: '8 min', total: '£19.00', allergy: 'Vegetarian', station: 'Cold kitchen - Chef Priya' },
@@ -29,7 +33,7 @@ let inventoryItems = [
   { sku: 'ST-006', barcode: '89012345006', name: 'Truffle oil', category: 'Dry goods · Pantry', qty: '6 bottles', expiry: '2027-08-20', supplier: 'Pantry Partners', status: 'Healthy' }
 ];
 
-const roomsData = [
+let roomsData = [
   { num: 'Room 301', status: 'Available', guest: 'Ready for check-in' },
   { num: 'Room 302', status: 'Occupied', guest: 'Amalia Patel' },
   { num: 'Room 303', status: 'Occupied', guest: 'Emma Wilson' },
@@ -47,141 +51,186 @@ const roomsData = [
   { num: 'Room 315', status: 'Occupied', guest: 'Emma Wilson' }
 ];
 
-// --- AUTHENTICATION (Connected to MySQL Backend) ---
-async function handleRegister(e) {
-  e.preventDefault();
-  const full_name = document.getElementById('regFullName').value;
-  const property_name = document.getElementById('regProperty').value;
-  const email = document.getElementById('regEmail').value;
-  const password = document.getElementById('regPassword').value;
-
+function saveLocalState() {
   try {
-    const res = await fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ full_name, property_name, email, password })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      alert('Registration error: ' + (data.error || 'Failed'));
-      return;
-    }
-    localStorage.setItem('marlow_token', data.token);
-    alert('Account created & saved to MySQL!');
-    switchView('hotel-overview');
-  } catch (err) {
-    alert('Server offline: ' + err.message);
-  }
+    localStorage.setItem('marlow_orders', JSON.stringify(orders));
+    localStorage.setItem('marlow_menu', JSON.stringify(menuItems));
+    localStorage.setItem('marlow_inventory', JSON.stringify(inventoryItems));
+  } catch (_) {}
 }
 
-async function handleLogin(e) {
-  e.preventDefault();
-  const email = document.getElementById('loginEmail').value;
-  const password = document.getElementById('loginPassword').value;
-
+function loadLocalState() {
   try {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      alert('Login failed: ' + (data.error || 'Invalid credentials'));
-      return;
-    }
-    localStorage.setItem('marlow_token', data.token);
-    switchView('hotel-overview');
-  } catch (err) {
-    alert('Server offline: ' + err.message);
+    const o = localStorage.getItem('marlow_orders');
+    const m = localStorage.getItem('marlow_menu');
+    const inv = localStorage.getItem('marlow_inventory');
+    if (o) orders = JSON.parse(o);
+    if (m) menuItems = JSON.parse(m);
+    if (inv) inventoryItems = JSON.parse(inv);
+  } catch (_) {}
+}
+
+async function apiRequest(endpoint, options = {}) {
+  const token = localStorage.getItem('marlow_token');
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${endpoint}`, Object.assign({}, options, { headers }));
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || `HTTP ${res.status}`);
   }
+  return res.json();
 }
 
 async function syncFromBackend() {
   try {
-    const [ordersRes, menuRes, invRes] = await Promise.all([
-      fetch('/api/orders'),
-      fetch('/api/menu'),
-      fetch('/api/inventory')
+    const health = await apiRequest('/health');
+    if (health.database !== 'connected') {
+      backendAvailable = false;
+      return;
+    }
+    backendAvailable = true;
+
+    const [dbOrders, dbMenu, dbInv] = await Promise.all([
+      apiRequest('/orders').catch(() => null),
+      apiRequest('/menu').catch(() => null),
+      apiRequest('/inventory').catch(() => null)
     ]);
 
-    if (ordersRes.ok) {
-      const dbOrders = await ordersRes.json();
-      if (Array.isArray(dbOrders) && dbOrders.length) {
-        orders = dbOrders.map(row => ({
-          id: row.order_id,
-          room: row.room_or_table,
-          guest: row.guest_name,
-          items: row.items_summary,
-          status: row.status,
-          elapsed: 'Live DB',
-          total: `£${Number(row.total_amount || 0).toFixed(2)}`,
-          allergy: row.allergy_alert || 'None',
-          station: row.station || 'Hot kitchen'
-        }));
-        selectedOrderId = orders[0].id;
-      }
+    if (Array.isArray(dbOrders) && dbOrders.length) {
+      orders = dbOrders.map((r) => ({
+        id: r.order_id,
+        room: r.room_or_table,
+        guest: r.guest_name,
+        items: r.items_summary,
+        status: r.status,
+        elapsed: 'Live',
+        total: `£${Number(r.total_amount || 0).toFixed(2)}`,
+        allergy: r.allergy_alert || 'None',
+        station: r.station || 'Hot kitchen'
+      }));
+      selectedOrderId = orders[0].id;
     }
 
-    if (menuRes.ok) {
-      const dbMenu = await menuRes.json();
-      if (Array.isArray(dbMenu) && dbMenu.length) {
-        const defaultImgs = [
-          'https://images.unsplash.com/photo-1467003909585-2f8a72700288?auto=format&fit=crop&w=600&q=80',
-          'https://images.unsplash.com/photo-1550304943-4f24f54ddde9?auto=format&fit=crop&w=600&q=80',
-          'https://images.unsplash.com/photo-1476124369491-e7addf5db371?auto=format&fit=crop&w=600&q=80',
-          'https://images.unsplash.com/photo-1528735602780-2552fd46c7af?auto=format&fit=crop&w=600&q=80',
-          'https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?auto=format&fit=crop&w=600&q=80',
-          'https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=600&q=80'
-        ];
-        menuItems = dbMenu.map((row, i) => ({
-          id: row.item_id,
-          name: row.name,
-          category: row.category + (row.dietary_tag ? ' · ' + row.dietary_tag : ''),
-          price: `£${Number(row.price || 0).toFixed(0)}`,
-          stock: row.is_available ? `${row.portions_left ?? 10} portions` : 'Sold out · Restock needed',
-          available: Boolean(row.is_available),
-          img: row.image_url || defaultImgs[i % defaultImgs.length]
-        }));
-      }
+    if (Array.isArray(dbMenu) && dbMenu.length) {
+      menuItems = dbMenu.map((m) => ({
+        id: m.item_id,
+        name: m.name,
+        category: `${m.category}${m.dietary_tag ? ' · ' + m.dietary_tag : ''}`,
+        price: `£${Number(m.price).toFixed(0)}`,
+        stock: m.portions_left > 0 ? `Available · ${m.portions_left} portions` : 'Unavailable · Restock needed',
+        available: Boolean(m.is_available),
+        img: m.image_url || 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=80'
+      }));
     }
 
-    if (invRes.ok) {
-      const dbInv = await invRes.json();
-      if (Array.isArray(dbInv) && dbInv.length) {
-        inventoryItems = dbInv.map(row => {
-          const qtyNum = Number(row.quantity_on_hand || 0);
-          const reorderNum = Number(row.reorder_level || 0);
-          const isLow = qtyNum <= reorderNum;
-          return {
-            sku: row.sku,
-            barcode: row.barcode,
-            name: row.ingredient_name,
-            category: row.category_storage,
-            qty: `${qtyNum} ${row.unit || ''}`.trim(),
-            expiry: String(row.expiry_date).slice(0, 10),
-            supplier: row.supplier,
-            status: isLow ? 'Low · Reorder' : 'Healthy'
-          };
-        });
-      }
+    if (Array.isArray(dbInv) && dbInv.length) {
+      inventoryItems = dbInv.map((i) => {
+        const qtyNum = Number(i.quantity_on_hand);
+        const reorderNum = Number(i.reorder_level);
+        const expDate = String(i.expiry_date || '').slice(0, 10);
+        const isLow = qtyNum <= reorderNum || expDate <= '2026-11-17';
+        return {
+          sku: i.sku,
+          barcode: i.barcode || 'N/A',
+          name: i.ingredient_name,
+          category: i.category_storage,
+          qty: `${qtyNum} ${i.unit}`,
+          expiry: expDate,
+          supplier: i.supplier,
+          status: isLow ? 'Low · Expiring soon' : 'Healthy'
+        };
+      });
     }
-  } catch (err) {
-    console.warn('Backend offline, using local demo data:', err.message);
+
+    saveLocalState();
+    renderOrders();
+    renderMenu();
+    renderInventory();
+  } catch (_) {
+    backendAvailable = false;
   }
-
-  renderOrders();
-  renderMenu();
-  renderInventory();
-  renderRooms();
 }
 
+// --- MOBILE NAVIGATION ---
+function toggleMobileMenu() {
+  const sidebar = document.querySelector('.sidebar');
+  const backdrop = document.getElementById('sidebarBackdrop');
+  if (!sidebar || !backdrop) return;
+  sidebar.classList.toggle('open');
+  backdrop.classList.toggle('open');
+}
+
+function closeMobileMenu() {
+  const sidebar = document.querySelector('.sidebar');
+  const backdrop = document.getElementById('sidebarBackdrop');
+  if (!sidebar || !backdrop) return;
+  sidebar.classList.remove('open');
+  backdrop.classList.remove('open');
+}
+
+// --- AUTH HANDLERS ---
+function applyUserBadge(fullName, propertyName) {
+  const chipSpan = document.querySelector('.user-chip span');
+  const avatar = document.querySelector('.user-chip .avatar');
+  if (chipSpan && fullName) {
+    chipSpan.textContent = `${propertyName || 'Marlow - Mayfair'} | ${fullName} · Manager`;
+  }
+  if (avatar && fullName) {
+    const initials = fullName.split(/\s+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
+    avatar.textContent = initials || 'AC';
+  }
+}
+
+async function handleRegister(e) {
+  e.preventDefault();
+  const fullName = document.getElementById('regFullName').value.trim();
+  const property = document.getElementById('regProperty').value.trim() || 'Marlow - Mayfair';
+  const email = document.getElementById('regEmail').value.trim();
+  const password = document.getElementById('regPassword').value;
+
+  try {
+    const data = await apiRequest('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ full_name: fullName, property_name: property, email, password })
+    });
+    if (data.token) localStorage.setItem('marlow_token', data.token);
+    applyUserBadge(fullName, property);
+    alert('Account saved to database! Redirecting to Hotel Overview...');
+  } catch (err) {
+    applyUserBadge(fullName, property);
+    alert('Account created locally (' + err.message + '). Redirecting to Hotel Overview...');
+  }
+  switchView('hotel-overview');
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+
+  try {
+    const data = await apiRequest('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password })
+    });
+    if (data.token) localStorage.setItem('marlow_token', data.token);
+    if (data.user) applyUserBadge(data.user.full_name, data.user.property_name);
+    await syncFromBackend();
+    alert('Logged in! Synced with database.');
+  } catch (err) {
+    alert('Logged in locally (' + err.message + ').');
+  }
+  switchView('hotel-overview');
+}
+
+// --- NAVIGATION ---
 function switchView(viewId, el) {
-  document.querySelectorAll('.view-section').forEach(sec => sec.classList.remove('active'));
+  document.querySelectorAll('.view-section').forEach((sec) => sec.classList.remove('active'));
   const target = document.getElementById('view-' + viewId);
   if (target) target.classList.add('active');
 
-  document.querySelectorAll('.nav-item, .sub-nav li').forEach(item => {
+  document.querySelectorAll('.nav-item, .sub-nav li').forEach((item) => {
     item.classList.remove('active', 'active-sub');
   });
 
@@ -212,9 +261,11 @@ function switchView(viewId, el) {
   };
   const bc = document.getElementById('breadcrumb-current');
   if (bc) bc.textContent = breadcrumbs[viewId] || 'Operations';
+  closeMobileMenu();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+// --- ORDERS & KITCHEN QUEUE ---
 function getStatusBadgeClass(status) {
   if (status === 'New') return 'badge-new';
   if (status === 'Preparing') return 'badge-prep';
@@ -234,15 +285,16 @@ function renderOrders(searchQuery = '') {
   if (!tbody) return;
   tbody.innerHTML = '';
 
-  const filtered = orders.filter(o => {
+  const filtered = orders.filter((o) => {
     const matchesFilter = currentOrderFilter === 'All' || o.status === currentOrderFilter;
-    const matchesSearch = o.id.toLowerCase().includes(searchQuery) ||
-                          o.room.toLowerCase().includes(searchQuery) ||
-                          o.items.toLowerCase().includes(searchQuery);
+    const matchesSearch =
+      o.id.toLowerCase().includes(searchQuery) ||
+      o.room.toLowerCase().includes(searchQuery) ||
+      o.items.toLowerCase().includes(searchQuery);
     return matchesFilter && matchesSearch;
   });
 
-  filtered.forEach(order => {
+  filtered.forEach((order) => {
     const tr = document.createElement('tr');
     tr.style.cursor = 'pointer';
     tr.onclick = () => selectOrder(order.id);
@@ -261,9 +313,9 @@ function renderOrders(searchQuery = '') {
     tbody.appendChild(tr);
   });
 
-  const ordersStat = document.getElementById('ordersActiveStat');
+  const activeStat = document.getElementById('ordersActiveStat');
   const kitchenStat = document.getElementById('kitchenActiveCount');
-  if (ordersStat) ordersStat.textContent = orders.length;
+  if (activeStat) activeStat.textContent = orders.length;
   if (kitchenStat) kitchenStat.textContent = orders.length;
   renderSelectedOrderDetail();
 }
@@ -274,7 +326,7 @@ function selectOrder(id) {
 }
 
 function renderSelectedOrderDetail() {
-  const order = orders.find(o => o.id === selectedOrderId) || orders[0];
+  const order = orders.find((o) => o.id === selectedOrderId) || orders[0];
   if (!order) return;
 
   document.getElementById('detailOrderId').textContent = 'Order ' + order.id;
@@ -285,67 +337,82 @@ function renderSelectedOrderDetail() {
   document.getElementById('detailRoom').textContent = order.room;
   document.getElementById('detailGuest').textContent = order.guest;
   document.getElementById('detailAllergy').innerHTML = `<strong>Allergy alert: ${order.allergy}</strong><br/>Use a clean preparation area and confirm ingredients before sending.`;
-  document.getElementById('detailItemsList').innerHTML = order.items.split(',').map(i => `• 1 × ${i.trim()}`).join('<br/>');
+  document.getElementById('detailItemsList').innerHTML = order.items.split(',').map((i) => `• 1 × ${i.trim()}`).join('<br/>');
   document.getElementById('detailTotal').textContent = order.total;
   document.getElementById('detailStation').textContent = order.station;
   document.getElementById('detailActionBtn').textContent = getNextActionLabel(order.status);
 }
 
 async function advanceOrder(id) {
-  const idx = orders.findIndex(o => o.id === id);
+  const idx = orders.findIndex((o) => o.id === id);
   if (idx === -1) return;
 
   const current = orders[idx].status;
-  const encodedId = encodeURIComponent(id);
+  let nextStatus = current;
+  let removeOrder = false;
 
-  try {
-    if (current === 'New' || current === 'Delayed') {
-      orders[idx].status = 'Preparing';
-      await fetch(`/api/orders/${encodedId}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'Preparing' })
-      });
-    } else if (current === 'Preparing') {
-      orders[idx].status = 'Ready';
-      await fetch(`/api/orders/${encodedId}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'Ready' })
-      });
-    } else if (current === 'Ready') {
-      orders.splice(idx, 1);
-      if (orders.length > 0) selectedOrderId = orders[0].id;
-      await fetch(`/api/orders/${encodedId}`, { method: 'DELETE' });
-    }
-  } catch (err) {
-    console.warn('Order update saved locally:', err.message);
+  if (current === 'New' || current === 'Delayed') {
+    nextStatus = 'Preparing';
+    orders[idx].status = nextStatus;
+  } else if (current === 'Preparing') {
+    nextStatus = 'Ready';
+    orders[idx].status = nextStatus;
+  } else if (current === 'Ready') {
+    nextStatus = 'Completed';
+    removeOrder = true;
+    orders.splice(idx, 1);
+    if (orders.length > 0) selectedOrderId = orders[0].id;
   }
 
-  const q = (document.getElementById('globalSearch')?.value || '').toLowerCase();
-  renderOrders(q);
+  saveLocalState();
+  renderOrders((document.getElementById('globalSearch')?.value || '').toLowerCase());
+
+  if (backendAvailable) {
+    apiRequest(`/orders/${encodeURIComponent(id)}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: nextStatus })
+    }).catch(() => {});
+  }
 }
 
 function advanceSelectedOrder() { advanceOrder(selectedOrderId); }
 
 function filterOrders(status) {
   currentOrderFilter = status;
-  const q = (document.getElementById('globalSearch')?.value || '').toLowerCase();
-  renderOrders(q);
+  renderOrders((document.getElementById('globalSearch')?.value || '').toLowerCase());
 }
 
 async function createNewOrder(e) {
   e.preventDefault();
-  const room = document.getElementById('newOrderRoom').value;
-  const guest = document.getElementById('newOrderGuest').value;
+  const room = document.getElementById('newOrderRoom').value.trim();
+  const guest = document.getElementById('newOrderGuest').value.trim();
   const [items, price] = document.getElementById('newOrderDish').value.split('|');
-  const allergy = document.getElementById('newOrderAllergy').value || 'None';
+  const allergy = document.getElementById('newOrderAllergy').value.trim() || 'None';
   const nextNum = '#10' + (49 + orders.length);
 
-  try {
-    const res = await fetch('/api/orders', {
+  const newOrderObj = {
+    id: nextNum,
+    room: room,
+    guest: guest,
+    items: items,
+    status: 'New',
+    elapsed: '1 min',
+    total: '£' + price,
+    allergy: allergy,
+    station: 'Hot kitchen - Chef Marco'
+  };
+
+  orders.unshift(newOrderObj);
+  selectedOrderId = nextNum;
+  saveLocalState();
+  closeModal('newOrderModal');
+  e.target.reset();
+  renderOrders();
+  switchView('meal-orders');
+
+  if (backendAvailable) {
+    apiRequest('/orders', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         order_id: nextNum,
         room_or_table: room,
@@ -353,46 +420,21 @@ async function createNewOrder(e) {
         items_summary: items,
         allergy_alert: allergy,
         station: 'Hot kitchen',
-        total_amount: Number(price)
+        status: 'New',
+        total_amount: Number(price) || 0
       })
-    });
-    if (res.ok) {
-      closeModal('newOrderModal');
-      e.target.reset();
-      await syncFromBackend();
-      switchView('meal-orders');
-      return;
-    }
-  } catch (err) {
-    console.warn('Backend POST failed, adding locally:', err.message);
+    }).catch(() => {});
   }
-
-  orders.unshift({
-    id: nextNum,
-    room,
-    guest,
-    items,
-    status: 'New',
-    elapsed: '1 min',
-    total: '£' + price,
-    allergy,
-    station: 'Hot kitchen - Chef Marco'
-  });
-
-  selectedOrderId = nextNum;
-  closeModal('newOrderModal');
-  e.target.reset();
-  renderOrders();
-  switchView('meal-orders');
 }
 
+// --- MENU MANAGEMENT ---
 function renderMenu(searchQuery = '') {
   const grid = document.getElementById('menuGalleryGrid');
   if (!grid) return;
   grid.innerHTML = '';
   let availableCount = 0;
 
-  menuItems.filter(m => m.name.toLowerCase().includes(searchQuery)).forEach(dish => {
+  menuItems.filter((m) => m.name.toLowerCase().includes(searchQuery)).forEach((dish) => {
     if (dish.available) availableCount++;
     const card = document.createElement('div');
     card.className = 'dish-card';
@@ -418,143 +460,137 @@ function renderMenu(searchQuery = '') {
     grid.appendChild(card);
   });
 
-  const menuCountEl = document.getElementById('menuAvailCount');
-  if (menuCountEl) menuCountEl.textContent = availableCount;
+  const availEl = document.getElementById('menuAvailCount');
+  if (availEl) availEl.textContent = availableCount;
 }
 
-async function toggleDish(id) {
-  const dish = menuItems.find(d => d.id === id);
+function toggleDish(id) {
+  const dish = menuItems.find((d) => d.id === id);
   if (!dish) return;
   dish.available = !dish.available;
+  saveLocalState();
+  renderMenu((document.getElementById('globalSearch')?.value || '').toLowerCase());
 
-  try {
-    await fetch(`/api/menu/${id}/toggle`, {
+  if (backendAvailable) {
+    apiRequest(`/menu/${id}/toggle`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_available: dish.available })
-    });
-  } catch (err) {
-    console.warn('Menu toggle saved locally:', err.message);
+    }).catch(() => {});
   }
-
-  const q = (document.getElementById('globalSearch')?.value || '').toLowerCase();
-  renderMenu(q);
 }
 
+// --- INVENTORY & BARCODE EXPIRY ---
 function renderInventory(searchQuery = '') {
   const tbody = document.getElementById('inventoryTableBody');
   if (!tbody) return;
   tbody.innerHTML = '';
   let lowCount = 0;
 
-  inventoryItems.filter(i => i.name.toLowerCase().includes(searchQuery) || i.sku.toLowerCase().includes(searchQuery)).forEach((item, index) => {
-    const isAlert = item.status !== 'Healthy';
-    if (isAlert) lowCount++;
+  inventoryItems
+    .filter((i) => i.name.toLowerCase().includes(searchQuery) || i.sku.toLowerCase().includes(searchQuery))
+    .forEach((item, index) => {
+      const isAlert = item.status !== 'Healthy';
+      if (isAlert) lowCount++;
 
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><strong>${item.sku}</strong><br/><span style="font-size:11px; color:var(--text-muted)">${item.barcode}</span></td>
-      <td>${item.name}</td>
-      <td>${item.category}</td>
-      <td>${item.qty}</td>
-      <td>${item.expiry}</td>
-      <td>${item.supplier}</td>
-      <td><span class="badge ${isAlert ? 'badge-delayed' : 'badge-ready'}">${item.status}</span></td>
-      <td><button class="btn btn-outline btn-sm" onclick="restockItem(${index})">Restock</button></td>
-    `;
-    tbody.appendChild(tr);
-  });
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><strong>${item.sku}</strong><br/><span style="font-size:11px; color:var(--text-muted)">${item.barcode}</span></td>
+        <td>${item.name}</td>
+        <td>${item.category}</td>
+        <td>${item.qty}</td>
+        <td>${item.expiry}</td>
+        <td>${item.supplier}</td>
+        <td><span class="badge ${isAlert ? 'badge-delayed' : 'badge-ready'}">${item.status}</span></td>
+        <td><button class="btn btn-outline btn-sm" onclick="restockItem(${index})">Restock</button></td>
+      `;
+      tbody.appendChild(tr);
+    });
 
   const lowEl = document.getElementById('lowStockCount');
   if (lowEl) lowEl.textContent = lowCount;
 }
 
-async function restockItem(index) {
+function restockItem(index) {
   const item = inventoryItems[index];
   if (!item) return;
-
-  try {
-    await fetch(`/api/inventory/${encodeURIComponent(item.sku)}/restock`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ quantity_on_hand: 12 })
-    });
-    await syncFromBackend();
-    return;
-  } catch (err) {
-    console.warn('Restock saved locally:', err.message);
-  }
-
-  inventoryItems[index].status = 'Healthy';
-  inventoryItems[index].qty = '12 kg / units';
+  item.status = 'Healthy';
+  item.qty = '12 kg / units';
+  saveLocalState();
   renderInventory();
+
+  if (backendAvailable) {
+    apiRequest(`/inventory/${encodeURIComponent(item.sku)}/restock`, {
+      method: 'PATCH',
+      body: JSON.stringify({ quantity_on_hand: 12 })
+    }).catch(() => {});
+  }
 }
 
-async function addInventoryItem(e) {
+function addInventoryItem(e) {
   e.preventDefault();
-  const sku = document.getElementById('stockSku').value;
-  const barcode = document.getElementById('stockBarcode').value;
-  const name = document.getElementById('stockName').value;
+  const sku = document.getElementById('stockSku').value.trim();
+  const barcode = document.getElementById('stockBarcode').value.trim();
+  const name = document.getElementById('stockName').value.trim();
   const category = document.getElementById('stockCategory').value;
-  const rawQty = document.getElementById('stockQty').value;
+  const qty = document.getElementById('stockQty').value.trim();
   const expiry = document.getElementById('stockExpiry').value;
-  const supplier = document.getElementById('stockSupplier').value;
-  const parsedQty = parseFloat(rawQty) || 1;
-  const unit = rawQty.replace(/[0-9.\s]/g, '') || 'units';
+  const supplier = document.getElementById('stockSupplier').value.trim();
 
-  try {
-    const res = await fetch('/api/inventory', {
+  const newItem = {
+    sku,
+    barcode,
+    name,
+    category,
+    qty,
+    expiry,
+    supplier,
+    status: 'Healthy'
+  };
+
+  inventoryItems.unshift(newItem);
+  saveLocalState();
+  closeModal('addStockModal');
+  e.target.reset();
+  renderInventory();
+
+  if (backendAvailable) {
+    const numMatch = parseFloat(qty) || 10;
+    const unitMatch = qty.replace(/^[0-9.]+\s*/, '') || 'units';
+    apiRequest('/inventory', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sku,
         barcode,
         ingredient_name: name,
         category_storage: category,
-        quantity_on_hand: parsedQty,
-        unit,
-        reorder_level: 2,
+        quantity_on_hand: numMatch,
+        unit: unitMatch,
+        reorder_level: 3,
         expiry_date: expiry,
         supplier
       })
-    });
-    if (res.ok) {
-      closeModal('addStockModal');
-      e.target.reset();
-      await syncFromBackend();
-      return;
-    }
-  } catch (err) {
-    console.warn('Inventory POST failed, adding locally:', err.message);
+    }).catch(() => {});
   }
-
-  inventoryItems.unshift({
-    sku,
-    barcode,
-    name,
-    category,
-    qty: rawQty,
-    expiry,
-    supplier,
-    status: 'Healthy'
-  });
-  closeModal('addStockModal');
-  e.target.reset();
-  renderInventory();
 }
 
+// --- ROOMS & GUESTS ---
 function renderRooms() {
   const grid = document.getElementById('roomsGrid');
   if (!grid) return;
-  grid.innerHTML = roomsData.map(r => `
+  grid.innerHTML = roomsData
+    .map(
+      (r) => `
     <div class="room-tile ${r.status.toLowerCase()}">
       <strong style="font-size:14px; display:block; margin-bottom:4px;">${r.num}</strong>
       <span style="font-size:11.5px; color:var(--text-secondary); display:block;">${r.status}</span>
       <span style="font-size:11.5px; color:var(--text-muted);">${r.guest}</span>
     </div>
-  `).join('');
+  `
+    )
+    .join('');
 }
 
+// --- SEARCH & MODALS ---
 function handleGlobalSearch() {
   const q = (document.getElementById('globalSearch')?.value || '').toLowerCase();
   renderOrders(q);
@@ -562,42 +598,22 @@ function handleGlobalSearch() {
   renderInventory(q);
 }
 
-function openModal(id) { document.getElementById(id)?.classList.add('open'); }
-function closeModal(id) { document.getElementById(id)?.classList.remove('open'); }
-
-function toggleMobileMenu() {
-  const sidebar = document.querySelector('.sidebar');
-  const backdrop = document.getElementById('sidebarBackdrop');
-  if (!sidebar) return;
-  const isOpen = sidebar.classList.toggle('open');
-  if (backdrop) backdrop.classList.toggle('open', isOpen);
-  document.body.style.overflow = isOpen ? 'hidden' : '';
+function openModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add('open');
 }
 
-function closeMobileMenu() {
-  const sidebar = document.querySelector('.sidebar');
-  const backdrop = document.getElementById('sidebarBackdrop');
-  if (sidebar) sidebar.classList.remove('open');
-  if (backdrop) backdrop.classList.remove('open');
-  document.body.style.overflow = '';
+function closeModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('open');
 }
 
+// Initialize Views & Sync Backend
 document.addEventListener('DOMContentLoaded', () => {
+  loadLocalState();
+  renderOrders();
+  renderMenu();
+  renderInventory();
+  renderRooms();
   syncFromBackend();
-
-  document.querySelectorAll('.sidebar .nav-item, .sidebar .sub-nav li').forEach(el => {
-    el.addEventListener('click', () => {
-      closeMobileMenu();
-    });
-  });
-
-  document.querySelectorAll('img').forEach(img => {
-    img.addEventListener('error', function() {
-      if (!this.dataset.fallbackApplied) {
-        this.dataset.fallbackApplied = '1';
-        this.style.background = 'linear-gradient(135deg, #1E4635 0%, #3B6E57 100%)';
-        this.style.minHeight = this.classList.contains('hero-banner') ? '150px' : '160px';
-      }
-    });
-  });
 });

@@ -1,11 +1,11 @@
 {
-  "name": "the-marlow-hotel-food-backend",
-  "version": "1.0.0",
-  "description": "Full-stack REST API for The Marlow Hotel & Food Management System",
+  "name": "the-marlow-hotel-food-suite",
+  "version": "2.0.0",
+  "description": "Full-stack multi-device Hotel & Food Management Suite (Express + MySQL + SQLite fallback)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "node server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

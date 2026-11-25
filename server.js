@@ -2,9 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const os = require('os');
 const path = require('path');
-require('dotenv').config();
-const pool = require('./config/db');
+const pool = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -14,17 +14,25 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'The-Marlow-Phone-And-Laptop-v5.html'));
-});
+function getLanIps() {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        ips.push(net.address);
+      }
+    }
+  }
+  return ips;
+}
 
-// Health check to verify MySQL connection
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     res.json({ status: 'ok', database: 'connected' });
   } catch (err) {
-    res.status(500).json({ status: 'error', database: err.message });
+    res.status(503).json({ status: 'degraded', database: 'disconnected', error: err.message });
   }
 });
 
@@ -35,19 +43,16 @@ app.post('/api/auth/register', async (req, res) => {
     if (!full_name || !email || !password) {
       return res.status(400).json({ error: 'Full name, email, and password are required' });
     }
-
     const hash = await bcrypt.hash(password, 10);
-    const propName = property_name || 'Marlow - Mayfair';
     const [result] = await pool.query(
       'INSERT INTO users (full_name, property_name, email, password_hash) VALUES (?, ?, ?, ?)',
-      [full_name, propName, email, hash]
+      [full_name, property_name || 'Marlow - Mayfair', email, hash]
     );
-
     const token = jwt.sign({ user_id: result.insertId, email }, JWT_SECRET, { expiresIn: '12h' });
     res.status(201).json({
       message: 'Account created',
       token,
-      user: { full_name, property_name: propName, email }
+      user: { full_name, property_name: property_name || 'Marlow - Mayfair', email, role: 'Manager' }
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -67,14 +72,19 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({
       message: 'Logged in',
       token,
-      user: { full_name: rows[0].full_name, role: rows[0].role }
+      user: {
+        full_name: rows[0].full_name,
+        property_name: rows[0].property_name,
+        email: rows[0].email,
+        role: rows[0].role
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 2. MEAL ORDERS & KITCHEN QUEUE ROUTES
+// 2. MEAL ORDERS ROUTES
 app.get('/api/orders', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM meal_orders ORDER BY created_at DESC');
@@ -86,14 +96,22 @@ app.get('/api/orders', async (req, res) => {
 
 app.post('/api/orders', async (req, res) => {
   try {
-    const { order_id, room_or_table, guest_name, items_summary, allergy_alert, station, total_amount } = req.body;
-    const generatedId = order_id || `#${Math.floor(1050 + Math.random() * 8900)}`;
-
+    const { order_id, room_or_table, guest_name, items_summary, allergy_alert, station, status, total_amount } = req.body;
     await pool.query(
-      'INSERT INTO meal_orders (order_id, room_or_table, guest_name, items_summary, allergy_alert, station, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [generatedId, room_or_table, guest_name, items_summary, allergy_alert || 'None', station || 'Hot kitchen', Number(total_amount)]
+      `INSERT INTO meal_orders (order_id, room_or_table, guest_name, items_summary, allergy_alert, station, status, total_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        order_id,
+        room_or_table,
+        guest_name,
+        items_summary,
+        allergy_alert || 'None',
+        station || 'Hot kitchen',
+        status || 'New',
+        Number(total_amount) || 0
+      ]
     );
-    res.status(201).json({ message: 'Order sent to kitchen', order_id: generatedId });
+    res.status(201).json({ message: 'Order sent to kitchen', order_id });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -103,6 +121,10 @@ app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
     const decodedId = decodeURIComponent(req.params.id);
+    if (status === 'Completed') {
+      await pool.query('DELETE FROM meal_orders WHERE order_id = ?', [decodedId]);
+      return res.json({ message: 'Order dispatched and completed', status });
+    }
     await pool.query('UPDATE meal_orders SET status = ? WHERE order_id = ?', [status, decodedId]);
     res.json({ message: 'Order status updated', status });
   } catch (err) {
@@ -110,17 +132,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
   }
 });
 
-app.delete('/api/orders/:id', async (req, res) => {
-  try {
-    const decodedId = decodeURIComponent(req.params.id);
-    await pool.query('DELETE FROM meal_orders WHERE order_id = ?', [decodedId]);
-    res.json({ message: 'Order dispatched' });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// 3. MENU MANAGEMENT ROUTES
+// 3. MENU ROUTES
 app.get('/api/menu', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM menu_items ORDER BY item_id ASC');
@@ -140,7 +152,7 @@ app.patch('/api/menu/:id/toggle', async (req, res) => {
   }
 });
 
-// 4. INVENTORY & BARCODE EXPIRY ROUTES
+// 4. INVENTORY ROUTES
 app.get('/api/inventory', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM inventory ORDER BY expiry_date ASC');
@@ -154,8 +166,19 @@ app.post('/api/inventory', async (req, res) => {
   try {
     const { sku, barcode, ingredient_name, category_storage, quantity_on_hand, unit, reorder_level, expiry_date, supplier } = req.body;
     await pool.query(
-      'INSERT INTO inventory (sku, barcode, ingredient_name, category_storage, quantity_on_hand, unit, reorder_level, expiry_date, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [sku, barcode, ingredient_name, category_storage, Number(quantity_on_hand), unit || 'units', Number(reorder_level ?? 2), expiry_date, supplier]
+      `INSERT INTO inventory (sku, barcode, ingredient_name, category_storage, quantity_on_hand, unit, reorder_level, expiry_date, supplier)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sku,
+        barcode || null,
+        ingredient_name,
+        category_storage,
+        Number(quantity_on_hand) || 0,
+        unit || 'units',
+        Number(reorder_level) || 2,
+        expiry_date,
+        supplier || 'Fresh & Co.'
+      ]
     );
     res.status(201).json({ message: 'Inventory item added' });
   } catch (err) {
@@ -165,14 +188,27 @@ app.post('/api/inventory', async (req, res) => {
 
 app.patch('/api/inventory/:sku/restock', async (req, res) => {
   try {
+    const sku = decodeURIComponent(req.params.sku);
     const qty = Number(req.body.quantity_on_hand) || 12;
-    await pool.query('UPDATE inventory SET quantity_on_hand = ? WHERE sku = ?', [qty, req.params.sku]);
-    res.json({ message: 'Stock restocked' });
+    await pool.query('UPDATE inventory SET quantity_on_hand = ? WHERE sku = ?', [qty, sku]);
+    res.json({ message: 'Stock restocked', quantity_on_hand: qty });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`The Marlow Full-Stack Server running on http://localhost:${PORT}`);
+app.get('/api/rooms', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM rooms ORDER BY room_number ASC');
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', async () => {
+  const ips = getLanIps();
+  console.log(`🏨 The Marlow Server running on http://localhost:${PORT}`);
+  ips.forEach((ip) => console.log(`📱 Open on your phone (same Wi-Fi): http://${ip}:${PORT}`));
+  await pool.testConnection();
 });

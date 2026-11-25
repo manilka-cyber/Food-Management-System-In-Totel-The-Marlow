@@ -1,7 +1,3 @@
--- ============================================================================
--- THE MARLOW — HOTEL & FOOD MANAGEMENT SYSTEM (MySQL Schema)
--- ============================================================================
-
 CREATE DATABASE IF NOT EXISTS the_marlow_db;
 USE the_marlow_db;
 
@@ -71,6 +67,25 @@ CREATE TABLE IF NOT EXISTS inventory (
     supplier VARCHAR(100) NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS housekeeping_tasks (
+    task_id INT AUTO_INCREMENT PRIMARY KEY,
+    room_number VARCHAR(10) NOT NULL,
+    task_type VARCHAR(80) NOT NULL,
+    assigned_to VARCHAR(100) NOT NULL,
+    priority ENUM('Normal', 'High', 'Scheduled') DEFAULT 'Normal',
+    status ENUM('In progress', 'Awaiting inspection', 'Completed', 'Scheduled') DEFAULT 'In progress',
+    FOREIGN KEY (room_number) REFERENCES rooms(room_number) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS staff_shifts (
+    shift_id INT AUTO_INCREMENT PRIMARY KEY,
+    staff_name VARCHAR(100) NOT NULL,
+    department ENUM('Food & beverage', 'Kitchen', 'Housekeeping', 'Front desk') NOT NULL,
+    role VARCHAR(80) NOT NULL,
+    shift_window VARCHAR(50) NOT NULL,
+    status ENUM('On duty', 'Upcoming', 'Off duty') DEFAULT 'On duty'
+);
+
 INSERT IGNORE INTO rooms (room_number, floor, room_type, status, guest_name, notes) VALUES
 ('301', 3, 'Deluxe King', 'Available', NULL, 'Ready for check-in'),
 ('302', 3, 'Deluxe King', 'Occupied', 'Amalia Patel', 'VIP welcome amenity'),
@@ -78,13 +93,19 @@ INSERT IGNORE INTO rooms (room_number, floor, room_type, status, guest_name, not
 ('304', 3, 'Deluxe King', 'Occupied', 'James Chen', 'Extra towels requested'),
 ('305', 3, 'Deluxe King', 'Maintenance', NULL, 'AC inspection');
 
-INSERT IGNORE INTO menu_items (item_code, name, category, dietary_tag, price, portions_left, is_available) VALUES
-('MN-001', 'Grilled salmon', 'Main courses', 'Gluten-free', 24.00, 6, TRUE),
-('MN-002', 'Caesar salad', 'Starters', 'Vegetarian option', 12.00, 32, TRUE),
-('MN-003', 'Truffle mushroom risotto', 'Main courses', 'Vegetarian', 19.00, 24, TRUE),
-('MN-004', 'Club sandwich', 'Light bites', 'Contains gluten', 16.00, 18, TRUE),
-('MN-005', 'Seared sea bass', 'Main courses', 'Gluten-free', 26.00, 0, FALSE),
-('MN-006', 'Lemon tart', 'Desserts', 'Contains dairy', 9.00, 15, TRUE);
+INSERT IGNORE INTO menu_items (item_code, name, category, dietary_tag, price, portions_left, is_available, image_url) VALUES
+('MN-001', 'Grilled salmon', 'Main courses', 'Gluten-free', 24.00, 6, TRUE, 'https://images.unsplash.com/photo-1467003909585-2f8a72700288?auto=format&fit=crop&w=600&q=80'),
+('MN-002', 'Caesar salad', 'Starters', 'Vegetarian option', 12.00, 32, TRUE, 'https://images.unsplash.com/photo-1550304943-4f24f54ddde9?auto=format&fit=crop&w=600&q=80'),
+('MN-003', 'Truffle mushroom risotto', 'Main courses', 'Vegetarian', 19.00, 24, TRUE, 'https://images.unsplash.com/photo-1476124369491-e7addf5db371?auto=format&fit=crop&w=600&q=80'),
+('MN-004', 'Club sandwich', 'Light bites', 'Contains gluten', 16.00, 18, TRUE, 'https://images.unsplash.com/photo-1528735602780-2552fd46c7af?auto=format&fit=crop&w=600&q=80'),
+('MN-005', 'Seared sea bass', 'Main courses', 'Gluten-free', 26.00, 0, FALSE, 'https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?auto=format&fit=crop&w=600&q=80'),
+('MN-006', 'Margherita pizza', 'Main courses', 'Vegetarian', 17.00, 20, TRUE, 'https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=600&q=80');
+
+INSERT IGNORE INTO meal_orders (order_id, room_or_table, guest_name, items_summary, allergy_alert, station, status, total_amount) VALUES
+('#1048', 'Room 304', 'Emma Wilson · 2 guests', 'Grilled salmon, Caesar salad', 'No nuts', 'Hot kitchen', 'New', 36.00),
+('#1047', 'Table 12', 'Walk-in · 2 guests', 'Truffle mushroom risotto', 'Vegetarian', 'Cold kitchen', 'Preparing', 19.00),
+('#1046', 'Room 218', 'Liam Patel · 1 guest', 'Club sandwich, fresh juice', 'None', 'Pastry & beverages', 'Ready', 16.00),
+('#1044', 'Room 512', 'James Chen · 2 guests', 'Seared sea bass, fries', 'Gluten-free', 'Hot kitchen', 'Delayed', 26.00);
 
 INSERT IGNORE INTO inventory (sku, barcode, ingredient_name, category_storage, quantity_on_hand, unit, reorder_level, expiry_date, supplier) VALUES
 ('ST-001', '89012345001', 'Atlantic salmon', 'Seafood · Chilled', 1.20, 'kg', 5.00, '2026-11-16', 'Coast & Catch'),
